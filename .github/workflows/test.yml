@@ -1,26 +1,81 @@
-name: Test Blue Archive downloader
+name: Download Blue Archive JP assets
 
 on:
   workflow_dispatch:
+    inputs:
+      resources:
+        description: "Resource groups to download"
+        type: choice
+        required: true
+        default: "all"
+        options:
+          - all
+          - table,media
+          - table
+          - media
+          - bundle
 
 permissions:
   contents: read
 
+concurrency:
+  group: blue-archive-jp-download
+  cancel-in-progress: false
+
 jobs:
-  check:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 350
 
     steps:
-      - name: Check available disk
-        run: |
-          df -h
-          python3 --version
-          git --version
+      - name: Checkout downloader
+        uses: actions/checkout@v4
+        with:
+          repository: ZM-Kimu/Blue-Archive-Asset-Downloader
+          submodules: recursive
+          path: project
 
-      - name: Check downloader documentation
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install downloader dependencies
+        working-directory: project
+        run: uv sync
+
+      - name: Check available disk space
+        run: df -h /
+
+      - name: Download JP Android resources
+        working-directory: project
+        env:
+          RESOURCE_GROUPS: ${{ inputs.resources }}
         run: |
-          git clone --depth 1 \
-            https://github.com/ZM-Kimu/Blue-Archive-Asset-Downloader \
-            project
-          sed -n '1,180p' project/docs/README.en.md
+          uv run ba-downloader assets download \
+            --region jp \
+            --platform android \
+            --resources "$RESOURCE_GROUPS"
+
+      - name: Report download results
+        if: always()
+        working-directory: project
+        run: |
+          echo "## Blue Archive JP Android download" >> "$GITHUB_STEP_SUMMARY"
+          if [ -d "jp/android/raw" ]; then
+            du -sh jp/android/raw | tee -a "$GITHUB_STEP_SUMMARY"
+            find jp/android/raw -maxdepth 2 -type f | wc -l | xargs -I{} echo "Files found: {}" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Download directory not found; inspect the download step logs." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Remaining disk space" >> "$GITHUB_STEP_SUMMARY"
+          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Explain temporary runner storage
+        if: always()
+        run: |
+          echo "::notice::Downloaded files are on a temporary runner and will be lost when the job ends. This workflow does not upload the game files to an artifact or external storage. Configure a storage destination before relying on it for long-term transfer."
