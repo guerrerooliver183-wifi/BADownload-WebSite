@@ -77,17 +77,25 @@ jobs:
           test -d "jp/$PLATFORM/raw"
           du -sh "jp/$PLATFORM/raw"
 
-      - name: Prepare archive with known size
+      - name: Install 7-Zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+          7z | head -n 2
+
+      - name: Prepare 7z archive with known size
         working-directory: project/jp
         env:
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
-          archive="$GITHUB_WORKSPACE/project/BlueArchiveJP-$PLATFORM.tar"
-          # Remove each file after it is added so the runner does not need
-          # to keep a second full copy of all assets on disk.
-          tar --remove-files -cf "$archive" -C "$GITHUB_WORKSPACE/project/jp/$PLATFORM" raw
+          archive="$GITHUB_WORKSPACE/project/BlueArchiveJP-$PLATFORM.7z"
+          cd "$GITHUB_WORKSPACE/project/jp/$PLATFORM"
+          # Store without compression. -sdel removes each source file after it
+          # is added, avoiding the need for a second full copy on disk.
+          7z a -t7z -mx=0 -sdel "$archive" raw
           test -s "$archive"
+          7z t "$archive"
           echo "Archive size: $(stat -c '%s bytes' "$archive")"
           ls -lh "$archive"
           echo "ARCHIVE_PATH=$archive" >> "$GITHUB_ENV"
@@ -103,7 +111,7 @@ jobs:
 
       - name: Start temporary archive endpoint and Quick Tunnel
         env:
-          ARCHIVE_PATH: ${{ github.workspace }}/project/BlueArchiveJP-${{ inputs.platform }}.tar
+          ARCHIVE_PATH: ${{ github.workspace }}/project/BlueArchiveJP-${{ inputs.platform }}.7z
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
@@ -116,7 +124,7 @@ jobs:
           archive_path = os.path.abspath(os.environ["ARCHIVE_PATH"])
           token = os.environ["DOWNLOAD_TOKEN"]
           platform = os.environ["PLATFORM"]
-          filename = f"BlueArchiveJP-{platform}.tar"
+          filename = f"BlueArchiveJP-{platform}.7z"
           expected_path = f"/{token}/{filename}"
 
           class Handler(BaseHTTPRequestHandler):
@@ -124,7 +132,7 @@ jobs:
 
               def send_archive_headers(self):
                   self.send_response(200)
-                  self.send_header("Content-Type", "application/x-tar")
+                  self.send_header("Content-Type", "application/x-7z-compressed")
                   self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
                   self.send_header("Content-Length", str(os.path.getsize(archive_path)))
                   self.send_header("Cache-Control", "no-store")
@@ -185,7 +193,7 @@ jobs:
             exit 1
           fi
 
-          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchiveJP-$PLATFORM.tar"
+          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchiveJP-$PLATFORM.7z"
           {
             echo "## Blue Archive JP browser download"
             echo
@@ -212,9 +220,9 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
         run: |
           echo "## Resource summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "BlueArchiveJP-$PLATFORM.tar" ]; then
-            ls -lh "BlueArchiveJP-$PLATFORM.tar" | tee -a "$GITHUB_STEP_SUMMARY"
-            stat -c 'Archive size in bytes: %s' "BlueArchiveJP-$PLATFORM.tar" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -f "BlueArchiveJP-$PLATFORM.7z" ]; then
+            ls -lh "BlueArchiveJP-$PLATFORM.7z" | tee -a "$GITHUB_STEP_SUMMARY"
+            stat -c 'Archive size in bytes: %s' "BlueArchiveJP-$PLATFORM.7z" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "Archive was not created; inspect the download and archive steps." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
