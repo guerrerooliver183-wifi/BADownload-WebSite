@@ -1,0 +1,26 @@
+name: Test Blue Archive downloader
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check available disk
+        run: |
+          df -h
+          python3 --version
+          git --version
+
+      - name: Check downloader documentation
+        run: |
+          git clone --depth 1 \
+            https://github.com/ZM-Kimu/Blue-Archive-Asset-Downloader \
+            project
+          sed -n '1,180p' project/docs/README.en.md
