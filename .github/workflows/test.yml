@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       region:
-        description: "Server region (GL, CH, JP)"
+        description: "Server region: Global (GL), China (CN), or Japan (JP)"
         type: choice
         required: true
         default: jp
@@ -98,7 +98,7 @@ jobs:
           7z | head -n 2
 
       - name: Prepare 7z archive with known size
-        working-directory: project/jp
+        working-directory: project
         env:
           REGION: ${{ inputs.region }}
           PLATFORM: ${{ inputs.platform }}
@@ -239,9 +239,10 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
         run: |
           echo "## Resource summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "BlueArchiveJP-$PLATFORM.7z" ]; then
-            ls -lh "BlueArchiveJP-$PLATFORM.7z" | tee -a "$GITHUB_STEP_SUMMARY"
-            stat -c 'Archive size in bytes: %s' "BlueArchiveJP-$PLATFORM.7z" | tee -a "$GITHUB_STEP_SUMMARY"
+          archive="BlueArchive-$REGION-$PLATFORM.7z"
+          if [ -f "$archive" ]; then
+            ls -lh "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
+            stat -c 'Archive size in bytes: %s' "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "Archive was not created; inspect the download and archive steps." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
