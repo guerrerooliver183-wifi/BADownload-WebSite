@@ -3,11 +3,20 @@ name: Download Blue Archive JP assets via temporary browser link
 on:
   workflow_dispatch:
     inputs:
+      platform:
+        description: "Platform"
+        type: choice
+        required: true
+        default: android
+        options:
+          - android
+          - ios
+          - windows
       resources:
         description: "Resource groups to download"
         type: choice
         required: true
-        default: "all"
+        default: all
         options:
           - all
           - table,media
@@ -50,22 +59,23 @@ jobs:
       - name: Check available disk space
         run: df -h /
 
-      - name: Download JP Android resources
+      - name: Download JP resources
         working-directory: project
         env:
           RESOURCE_GROUPS: ${{ inputs.resources }}
+          PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
           if [ "$RESOURCE_GROUPS" = "all" ]; then
-            uv run ba-downloader assets download --region jp --platform android
+            uv run ba-downloader assets download --region jp --platform "$PLATFORM"
           else
             uv run ba-downloader assets download \
               --region jp \
-              --platform android \
+              --platform "$PLATFORM" \
               --resources "$RESOURCE_GROUPS"
           fi
-          test -d jp/android/raw
-          du -sh jp/android/raw
+          test -d "jp/$PLATFORM/raw"
+          du -sh "jp/$PLATFORM/raw"
 
       - name: Install cloudflared
         run: |
@@ -78,11 +88,12 @@ jobs:
 
       - name: Start temporary archive endpoint and Quick Tunnel
         env:
-          RAW_DIR: ${{ github.workspace }}/project/jp/android/raw
+          RAW_DIR: ${{ github.workspace }}/project/jp/${{ inputs.platform }}/raw
+          PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
           export DOWNLOAD_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-          export RAW_DIR
+          export RAW_DIR PLATFORM
           cat > /tmp/archive_server.py <<'PY'
           import os
           import subprocess
@@ -90,7 +101,9 @@ jobs:
 
           raw_dir = os.path.abspath(os.environ["RAW_DIR"])
           token = os.environ["DOWNLOAD_TOKEN"]
-          expected_path = f"/{token}/BlueArchiveJP.tar"
+          platform = os.environ["PLATFORM"]
+          filename = f"BlueArchiveJP-{platform}.tar"
+          expected_path = f"/{token}/{filename}"
 
           class Handler(BaseHTTPRequestHandler):
               protocol_version = "HTTP/1.0"
@@ -105,7 +118,7 @@ jobs:
 
                   self.send_response(200)
                   self.send_header("Content-Type", "application/x-tar")
-                  self.send_header("Content-Disposition", 'attachment; filename="BlueArchiveJP.tar"')
+                  self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
                   self.send_header("Cache-Control", "no-store")
                   self.end_headers()
 
@@ -135,7 +148,8 @@ jobs:
           ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
           PY
 
-          nohup python3 -u /tmp/archive_server.py >/tmp/archive-server.log 2>&1 &
+          nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" RAW_DIR="$RAW_DIR" PLATFORM="$PLATFORM" \
+            python3 -u /tmp/archive_server.py >/tmp/archive-server.log 2>&1 &
           echo "$!" > /tmp/archive-server.pid
 
           nohup cloudflared tunnel --url http://127.0.0.1:8765 --no-autoupdate --logfile /tmp/cloudflared.log >/dev/null 2>&1 &
@@ -157,9 +171,11 @@ jobs:
             exit 1
           fi
 
-          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchiveJP.tar"
+          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchiveJP-$PLATFORM.tar"
           {
             echo "## Blue Archive JP browser download"
+            echo
+            echo "Platform: $PLATFORM"
             echo
             echo "Open this temporary link in Chrome on Android:"
             echo
@@ -173,18 +189,18 @@ jobs:
           echo "Temporary download URL: $DOWNLOAD_URL"
           echo "The tunnel is active. Keep this workflow running while downloading."
           echo "The job will stop automatically at its 350-minute timeout."
-
-          # Keep the disposable runner and tunnel alive; GitHub's job timeout ends them.
           sleep 340m
 
       - name: Report results
         if: always()
         working-directory: project
+        env:
+          PLATFORM: ${{ inputs.platform }}
         run: |
           echo "## Resource summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -d "jp/android/raw" ]; then
-            du -sh jp/android/raw | tee -a "$GITHUB_STEP_SUMMARY"
-            find jp/android/raw -type f | wc -l | xargs -I{} echo "Files downloaded: {}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -d "jp/$PLATFORM/raw" ]; then
+            du -sh "jp/$PLATFORM/raw" | tee -a "$GITHUB_STEP_SUMMARY"
+            find "jp/$PLATFORM/raw" -type f | wc -l | xargs -I{} echo "Files downloaded: {}" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "Resource directory was not created; inspect the download step logs." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
