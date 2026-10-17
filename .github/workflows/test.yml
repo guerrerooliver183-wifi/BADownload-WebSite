@@ -55,10 +55,14 @@ jobs:
         env:
           RESOURCE_GROUPS: ${{ inputs.resources }}
         run: |
-          uv run ba-downloader assets download \
-            --region jp \
-            --platform android \
-            --resources "$RESOURCE_GROUPS"
+          if [ "$RESOURCE_GROUPS" = "all" ]; then
+            uv run ba-downloader assets download --region jp --platform android
+          else
+            uv run ba-downloader assets download \
+              --region jp \
+              --platform android \
+              --resources "$RESOURCE_GROUPS"
+          fi
 
       - name: Report download results
         if: always()
