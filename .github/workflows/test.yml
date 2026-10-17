@@ -1,8 +1,17 @@
-name: Download Blue Archive JP assets via temporary browser link
+name: Download Blue Archive assets via temporary browser link
 
 on:
   workflow_dispatch:
     inputs:
+      region:
+        description: "Server region (GL, CH, JP)"
+        type: choice
+        required: true
+        default: jp
+        options:
+          - gl
+          - cn
+          - jp
       platform:
         description: "Platform"
         type: choice
@@ -28,7 +37,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: blue-archive-jp-download
+  group: blue-archive-${{ inputs.region }}-download
   cancel-in-progress: false
 
 jobs:
@@ -59,23 +68,28 @@ jobs:
       - name: Check available disk space
         run: df -h /
 
-      - name: Download JP resources
+      - name: Download resources
         working-directory: project
         env:
           RESOURCE_GROUPS: ${{ inputs.resources }}
+          REGION: ${{ inputs.region }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
+          if [ "$REGION" != "jp" ] && [ "$PLATFORM" = "ios" ]; then
+            echo "::error::The iOS platform is only supported for the JP region."
+            exit 1
+          fi
           if [ "$RESOURCE_GROUPS" = "all" ]; then
-            uv run ba-downloader assets download --region jp --platform "$PLATFORM"
+            uv run ba-downloader assets download --region "$REGION" --platform "$PLATFORM"
           else
             uv run ba-downloader assets download \
-              --region jp \
+              --region "$REGION" \
               --platform "$PLATFORM" \
               --resources "$RESOURCE_GROUPS"
           fi
-          test -d "jp/$PLATFORM/raw"
-          du -sh "jp/$PLATFORM/raw"
+          test -d "$REGION/$PLATFORM/raw"
+          du -sh "$REGION/$PLATFORM/raw"
 
       - name: Install 7-Zip
         run: |
@@ -86,11 +100,12 @@ jobs:
       - name: Prepare 7z archive with known size
         working-directory: project/jp
         env:
+          REGION: ${{ inputs.region }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
-          archive="$GITHUB_WORKSPACE/project/BlueArchiveJP-$PLATFORM.7z"
-          cd "$GITHUB_WORKSPACE/project/jp/$PLATFORM"
+          archive="$GITHUB_WORKSPACE/project/BlueArchive-$REGION-$PLATFORM.7z"
+          cd "$GITHUB_WORKSPACE/project/$REGION/$PLATFORM"
           # Store without compression. -sdel removes each source file after it
           # is added, avoiding the need for a second full copy on disk.
           7z a -t7z -mx=0 -sdel "$archive" raw
@@ -111,7 +126,8 @@ jobs:
 
       - name: Start temporary archive endpoint and Quick Tunnel
         env:
-          ARCHIVE_PATH: ${{ github.workspace }}/project/BlueArchiveJP-${{ inputs.platform }}.7z
+          ARCHIVE_PATH: ${{ github.workspace }}/project/BlueArchive-${{ inputs.region }}-${{ inputs.platform }}.7z
+          REGION: ${{ inputs.region }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
@@ -123,8 +139,9 @@ jobs:
 
           archive_path = os.path.abspath(os.environ["ARCHIVE_PATH"])
           token = os.environ["DOWNLOAD_TOKEN"]
+          region = os.environ["REGION"]
           platform = os.environ["PLATFORM"]
-          filename = f"BlueArchiveJP-{platform}.7z"
+          filename = f"BlueArchive-{region}-{platform}.7z"
           expected_path = f"/{token}/{filename}"
 
           class Handler(BaseHTTPRequestHandler):
@@ -170,7 +187,7 @@ jobs:
           ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
           PY
 
-          nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" ARCHIVE_PATH="$ARCHIVE_PATH" PLATFORM="$PLATFORM" \
+          nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" ARCHIVE_PATH="$ARCHIVE_PATH" REGION="$REGION" PLATFORM="$PLATFORM" \
             python3 -u /tmp/archive_server.py >/tmp/archive-server.log 2>&1 &
           echo "$!" > /tmp/archive-server.pid
 
@@ -193,11 +210,12 @@ jobs:
             exit 1
           fi
 
-          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchiveJP-$PLATFORM.7z"
+          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchive-$REGION-$PLATFORM.7z"
           {
-            echo "## Blue Archive JP browser download"
+            echo "## Blue Archive $REGION browser download"
             echo
-            echo "Platform: $PLATFORM"
+            echo "Server region: $REGION"
+          echo "Platform: $PLATFORM"
             echo
             echo "Open this temporary link in Chrome on Android:"
             echo
@@ -217,6 +235,7 @@ jobs:
         if: always()
         working-directory: project
         env:
+          REGION: ${{ inputs.region }}
           PLATFORM: ${{ inputs.platform }}
         run: |
           echo "## Resource summary" >> "$GITHUB_STEP_SUMMARY"
