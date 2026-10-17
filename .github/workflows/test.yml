@@ -108,10 +108,9 @@ jobs:
         run: |
           set -eu
           export DOWNLOAD_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-          export RAW_DIR PLATFORM
+          export ARCHIVE_PATH PLATFORM
           cat > /tmp/archive_server.py <<'PY'
           import os
-          import subprocess
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
           archive_path = os.path.abspath(os.environ["ARCHIVE_PATH"])
