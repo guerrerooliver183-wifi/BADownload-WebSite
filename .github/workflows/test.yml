@@ -1,4 +1,4 @@
-name: Download Blue Archive JP assets to Termux
+name: Download Blue Archive JP assets via temporary browser link
 
 on:
   workflow_dispatch:
@@ -23,32 +23,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  download-and-transfer:
+  download-and-serve:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
     steps:
-      - name: Validate required secrets
-        env:
-          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
-          TERMUX_USER: ${{ secrets.TERMUX_USER }}
-          TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
-        run: |
-          set -eu
-          for name in TAILSCALE_AUTHKEY TERMUX_HOST TERMUX_USER TERMUX_SSH_PRIVATE_KEY; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing repository secret: $name"
-              exit 1
-            fi
-          done
-
-      - name: Connect runner to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          ping: ${{ secrets.TERMUX_HOST }}
-
       - name: Checkout downloader
         uses: actions/checkout@v4
         with:
@@ -64,11 +43,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Install transfer tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rsync openssh-client
-
       - name: Install downloader dependencies
         working-directory: project
         run: uv sync
@@ -81,6 +55,7 @@ jobs:
         env:
           RESOURCE_GROUPS: ${{ inputs.resources }}
         run: |
+          set -eu
           if [ "$RESOURCE_GROUPS" = "all" ]; then
             uv run ba-downloader assets download --region jp --platform android
           else
@@ -89,43 +64,128 @@ jobs:
               --platform android \
               --resources "$RESOURCE_GROUPS"
           fi
-
-      - name: Prepare SSH connection
-        env:
-          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
-          TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
-        run: |
-          set -eu
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
-          printf '%s\n' "$TERMUX_SSH_PRIVATE_KEY" > "$HOME/.ssh/termux_key"
-          chmod 600 "$HOME/.ssh/termux_key"
-          ssh-keyscan -p 8022 "$TERMUX_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
-
-      - name: Transfer resources to Android via Tailscale
-        working-directory: project
-        env:
-          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
-          TERMUX_USER: ${{ secrets.TERMUX_USER }}
-        run: |
-          set -eu
           test -d jp/android/raw
-          ssh -p 8022 -i "$HOME/.ssh/termux_key" "$TERMUX_USER@$TERMUX_HOST" \
-            'mkdir -p "$HOME/storage/shared/Download/BlueArchiveJP/raw"'
-          rsync -avh --partial --append-verify --info=progress2 \
-            -e "ssh -p 8022 -i $HOME/.ssh/termux_key" \
-            jp/android/raw/ \
-            "$TERMUX_USER@$TERMUX_HOST:storage/shared/Download/BlueArchiveJP/raw/"
+          du -sh jp/android/raw
 
-      - name: Report download and transfer results
+      - name: Install cloudflared
+        run: |
+          set -eu
+          curl --fail --silent --show-error --location \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            --output /tmp/cloudflared
+          sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Start temporary archive endpoint and Quick Tunnel
+        env:
+          RAW_DIR: ${{ github.workspace }}/project/jp/android/raw
+        run: |
+          set -eu
+          export DOWNLOAD_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          export RAW_DIR
+          cat > /tmp/archive_server.py <<'PY'
+          import os
+          import subprocess
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          raw_dir = os.path.abspath(os.environ["RAW_DIR"])
+          token = os.environ["DOWNLOAD_TOKEN"]
+          expected_path = f"/{token}/BlueArchiveJP.tar"
+
+          class Handler(BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.0"
+
+              def do_GET(self):
+                  if self.path != expected_path:
+                      self.send_error(404)
+                      return
+                  if not os.path.isdir(raw_dir):
+                      self.send_error(404, "Resources not found")
+                      return
+
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/x-tar")
+                  self.send_header("Content-Disposition", 'attachment; filename="BlueArchiveJP.tar"')
+                  self.send_header("Cache-Control", "no-store")
+                  self.end_headers()
+
+                  proc = subprocess.Popen(
+                      ["tar", "-cf", "-", "-C", os.path.dirname(raw_dir), os.path.basename(raw_dir)],
+                      stdout=subprocess.PIPE,
+                  )
+                  try:
+                      while True:
+                          chunk = proc.stdout.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          self.wfile.write(chunk)
+                          self.wfile.flush()
+                      if proc.wait() != 0:
+                          print("tar exited with a non-zero status", flush=True)
+                  except (BrokenPipeError, ConnectionResetError):
+                      proc.terminate()
+                      proc.wait()
+                  finally:
+                      if proc.stdout:
+                          proc.stdout.close()
+
+              def log_message(self, fmt, *args):
+                  print("%s - %s" % (self.client_address[0], fmt % args), flush=True)
+
+          ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+          PY
+
+          nohup python3 -u /tmp/archive_server.py >/tmp/archive-server.log 2>&1 &
+          echo "$!" > /tmp/archive-server.pid
+
+          nohup cloudflared tunnel --url http://127.0.0.1:8765 --no-autoupdate --logfile /tmp/cloudflared.log >/dev/null 2>&1 &
+          echo "$!" > /tmp/cloudflared.pid
+
+          TUNNEL_URL=""
+          for attempt in $(seq 1 60); do
+            TUNNEL_URL="$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -n 1 || true)"
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "::error::Cloudflare Quick Tunnel did not provide a URL."
+            cat /tmp/cloudflared.log || true
+            cat /tmp/archive-server.log || true
+            exit 1
+          fi
+
+          DOWNLOAD_URL="$TUNNEL_URL/$DOWNLOAD_TOKEN/BlueArchiveJP.tar"
+          {
+            echo "## Blue Archive JP browser download"
+            echo
+            echo "Open this temporary link in Chrome on Android:"
+            echo
+            echo "$DOWNLOAD_URL"
+            echo
+            echo "**Keep this Actions run active until the browser download finishes.** The link is public to anyone who obtains it while the tunnel is running."
+            echo
+            echo "The response is a streamed TAR archive and does not support resuming an interrupted download. Ensure the phone has enough free space for the archive and extraction."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Temporary download URL: $DOWNLOAD_URL"
+          echo "The tunnel is active. Keep this workflow running while downloading."
+          echo "The job will stop automatically at its 350-minute timeout."
+
+          # Keep the disposable runner and tunnel alive; GitHub's job timeout ends them.
+          sleep 340m
+
+      - name: Report results
         if: always()
         working-directory: project
         run: |
-          echo "## Blue Archive JP Android transfer" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Resource summary" >> "$GITHUB_STEP_SUMMARY"
           if [ -d "jp/android/raw" ]; then
             du -sh jp/android/raw | tee -a "$GITHUB_STEP_SUMMARY"
-            find jp/android/raw -maxdepth 2 -type f | wc -l | xargs -I{} echo "Local files found: {}" | tee -a "$GITHUB_STEP_SUMMARY"
+            find jp/android/raw -type f | wc -l | xargs -I{} echo "Files downloaded: {}" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "Download directory not found; inspect the download step logs." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Resource directory was not created; inspect the download step logs." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           df -h / | tee -a "$GITHUB_STEP_SUMMARY"
