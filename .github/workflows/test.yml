@@ -92,17 +92,15 @@ jobs:
 
       - name: Prepare SSH connection
         env:
+          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
           TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
         run: |
           set -eu
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
-          printf '%s\n' "$TERMUX_SSH_PRIVATE_KEY" > "$HOME/.ssh/termux_key"
+          printf '%s\\n' "$TERMUX_SSH_PRIVATE_KEY" > "$HOME/.ssh/termux_key"
           chmod 600 "$HOME/.ssh/termux_key"
           ssh-keyscan -p 8022 "$TERMUX_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
-        env:
-          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
-          TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
 
       - name: Transfer resources to Android via Tailscale
         working-directory: project
