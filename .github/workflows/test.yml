@@ -1,4 +1,4 @@
-name: Download Blue Archive JP assets
+name: Download Blue Archive JP assets to Termux
 
 on:
   workflow_dispatch:
@@ -23,11 +23,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  download:
+  download-and-transfer:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
     steps:
+      - name: Validate required secrets
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
+          TERMUX_USER: ${{ secrets.TERMUX_USER }}
+          TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
+        run: |
+          set -eu
+          for name in TAILSCALE_AUTHKEY TERMUX_HOST TERMUX_USER TERMUX_SSH_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret: $name"
+              exit 1
+            fi
+          done
+
+      - name: Connect runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: ${{ secrets.TERMUX_HOST }}
+
       - name: Checkout downloader
         uses: actions/checkout@v4
         with:
@@ -42,6 +63,11 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+
+      - name: Install transfer tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync openssh-client
 
       - name: Install downloader dependencies
         working-directory: project
@@ -64,22 +90,44 @@ jobs:
               --resources "$RESOURCE_GROUPS"
           fi
 
-      - name: Report download results
+      - name: Prepare SSH connection
+        env:
+          TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
+        run: |
+          set -eu
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$TERMUX_SSH_PRIVATE_KEY" > "$HOME/.ssh/termux_key"
+          chmod 600 "$HOME/.ssh/termux_key"
+          ssh-keyscan -p 8022 "$TERMUX_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+        env:
+          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
+          TERMUX_SSH_PRIVATE_KEY: ${{ secrets.TERMUX_SSH_PRIVATE_KEY }}
+
+      - name: Transfer resources to Android via Tailscale
+        working-directory: project
+        env:
+          TERMUX_HOST: ${{ secrets.TERMUX_HOST }}
+          TERMUX_USER: ${{ secrets.TERMUX_USER }}
+        run: |
+          set -eu
+          test -d jp/android/raw
+          ssh -p 8022 -i "$HOME/.ssh/termux_key" "$TERMUX_USER@$TERMUX_HOST" \
+            'mkdir -p "$HOME/storage/shared/Download/BlueArchiveJP/raw"'
+          rsync -avh --partial --append-verify --info=progress2 \
+            -e "ssh -p 8022 -i $HOME/.ssh/termux_key" \
+            jp/android/raw/ \
+            "$TERMUX_USER@$TERMUX_HOST:storage/shared/Download/BlueArchiveJP/raw/"
+
+      - name: Report download and transfer results
         if: always()
         working-directory: project
         run: |
-          echo "## Blue Archive JP Android download" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Blue Archive JP Android transfer" >> "$GITHUB_STEP_SUMMARY"
           if [ -d "jp/android/raw" ]; then
             du -sh jp/android/raw | tee -a "$GITHUB_STEP_SUMMARY"
-            find jp/android/raw -maxdepth 2 -type f | wc -l | xargs -I{} echo "Files found: {}" | tee -a "$GITHUB_STEP_SUMMARY"
+            find jp/android/raw -maxdepth 2 -type f | wc -l | xargs -I{} echo "Local files found: {}" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "Download directory not found; inspect the download step logs." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Remaining disk space" >> "$GITHUB_STEP_SUMMARY"
           df -h / | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Explain temporary runner storage
-        if: always()
-        run: |
-          echo "::notice::Downloaded files are on a temporary runner and will be lost when the job ends. This workflow does not upload the game files to an artifact or external storage. Configure a storage destination before relying on it for long-term transfer."
