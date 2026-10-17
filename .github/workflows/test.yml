@@ -77,6 +77,21 @@ jobs:
           test -d "jp/$PLATFORM/raw"
           du -sh "jp/$PLATFORM/raw"
 
+      - name: Prepare archive with known size
+        working-directory: project/jp
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -eu
+          archive="$GITHUB_WORKSPACE/project/BlueArchiveJP-$PLATFORM.tar"
+          # Remove each file after it is added so the runner does not need
+          # to keep a second full copy of all assets on disk.
+          tar --remove-files -cf "$archive" -C "$GITHUB_WORKSPACE/project/jp/$PLATFORM" raw
+          test -s "$archive"
+          echo "Archive size: $(stat -c '%s bytes' "$archive")"
+          ls -lh "$archive"
+          echo "ARCHIVE_PATH=$archive" >> "$GITHUB_ENV"
+
       - name: Install cloudflared
         run: |
           set -eu
@@ -88,7 +103,7 @@ jobs:
 
       - name: Start temporary archive endpoint and Quick Tunnel
         env:
-          RAW_DIR: ${{ github.workspace }}/project/jp/${{ inputs.platform }}/raw
+          ARCHIVE_PATH: ${{ github.workspace }}/project/BlueArchiveJP-${{ inputs.platform }}.tar
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -eu
@@ -99,7 +114,7 @@ jobs:
           import subprocess
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-          raw_dir = os.path.abspath(os.environ["RAW_DIR"])
+          archive_path = os.path.abspath(os.environ["ARCHIVE_PATH"])
           token = os.environ["DOWNLOAD_TOKEN"]
           platform = os.environ["PLATFORM"]
           filename = f"BlueArchiveJP-{platform}.tar"
@@ -108,39 +123,39 @@ jobs:
           class Handler(BaseHTTPRequestHandler):
               protocol_version = "HTTP/1.0"
 
+              def send_archive_headers(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/x-tar")
+                  self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                  self.send_header("Content-Length", str(os.path.getsize(archive_path)))
+                  self.send_header("Cache-Control", "no-store")
+                  self.send_header("Accept-Ranges", "none")
+                  self.end_headers()
+
+              def do_HEAD(self):
+                  if self.path != expected_path or not os.path.isfile(archive_path):
+                      self.send_error(404)
+                      return
+                  self.send_archive_headers()
+
               def do_GET(self):
                   if self.path != expected_path:
                       self.send_error(404)
                       return
-                  if not os.path.isdir(raw_dir):
-                      self.send_error(404, "Resources not found")
+                  if not os.path.isfile(archive_path):
+                      self.send_error(404, "Archive not found")
                       return
 
-                  self.send_response(200)
-                  self.send_header("Content-Type", "application/x-tar")
-                  self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-                  self.send_header("Cache-Control", "no-store")
-                  self.end_headers()
-
-                  proc = subprocess.Popen(
-                      ["tar", "-cf", "-", "-C", os.path.dirname(raw_dir), os.path.basename(raw_dir)],
-                      stdout=subprocess.PIPE,
-                  )
+                  self.send_archive_headers()
                   try:
-                      while True:
-                          chunk = proc.stdout.read(1024 * 1024)
-                          if not chunk:
-                              break
-                          self.wfile.write(chunk)
-                          self.wfile.flush()
-                      if proc.wait() != 0:
-                          print("tar exited with a non-zero status", flush=True)
+                      with open(archive_path, "rb") as archive:
+                          while True:
+                              chunk = archive.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              self.wfile.write(chunk)
                   except (BrokenPipeError, ConnectionResetError):
-                      proc.terminate()
-                      proc.wait()
-                  finally:
-                      if proc.stdout:
-                          proc.stdout.close()
+                      print("Client disconnected before download completed", flush=True)
 
               def log_message(self, fmt, *args):
                   print("%s - %s" % (self.client_address[0], fmt % args), flush=True)
@@ -148,7 +163,7 @@ jobs:
           ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
           PY
 
-          nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" RAW_DIR="$RAW_DIR" PLATFORM="$PLATFORM" \
+          nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" ARCHIVE_PATH="$ARCHIVE_PATH" PLATFORM="$PLATFORM" \
             python3 -u /tmp/archive_server.py >/tmp/archive-server.log 2>&1 &
           echo "$!" > /tmp/archive-server.pid
 
@@ -183,7 +198,7 @@ jobs:
             echo
             echo "**Keep this Actions run active until the browser download finishes.** The link is public to anyone who obtains it while the tunnel is running."
             echo
-            echo "The response is a streamed TAR archive and does not support resuming an interrupted download. Ensure the phone has enough free space for the archive and extraction."
+            echo "The server sends the exact Content-Length so Chrome can display the total size. Interrupted downloads cannot be resumed. Ensure the phone has enough free space for the archive and extraction."
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "Temporary download URL: $DOWNLOAD_URL"
@@ -198,10 +213,10 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
         run: |
           echo "## Resource summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -d "jp/$PLATFORM/raw" ]; then
-            du -sh "jp/$PLATFORM/raw" | tee -a "$GITHUB_STEP_SUMMARY"
-            find "jp/$PLATFORM/raw" -type f | wc -l | xargs -I{} echo "Files downloaded: {}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -f "BlueArchiveJP-$PLATFORM.tar" ]; then
+            ls -lh "BlueArchiveJP-$PLATFORM.tar" | tee -a "$GITHUB_STEP_SUMMARY"
+            stat -c 'Archive size in bytes: %s' "BlueArchiveJP-$PLATFORM.tar" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "Resource directory was not created; inspect the download step logs." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Archive was not created; inspect the download and archive steps." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           df -h / | tee -a "$GITHUB_STEP_SUMMARY"
