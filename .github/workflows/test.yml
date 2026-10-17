@@ -16,7 +16,7 @@ on:
         description: "Platform"
         type: choice
         required: true
-        default: android
+        default: windows
         options:
           - android
           - ios
