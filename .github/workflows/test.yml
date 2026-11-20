@@ -307,7 +307,7 @@ jobs:
                       flush=True
                   )
 
-                    ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
           PY
 
           nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" ARCHIVE_PATH="$ARCHIVE_PATH" REGION="$REGION" PLATFORM="$PLATFORM" \
