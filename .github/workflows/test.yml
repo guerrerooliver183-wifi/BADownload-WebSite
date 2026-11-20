@@ -144,47 +144,170 @@ jobs:
           filename = f"BlueArchive-{region}-{platform}.7z"
           expected_path = f"/{token}/{filename}"
 
-          class Handler(BaseHTTPRequestHandler):
-              protocol_version = "HTTP/1.0"
+          import email.utils
+          import os
+          import re
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-              def send_archive_headers(self):
-                  self.send_response(200)
+          archive_path = os.path.abspath(os.environ["ARCHIVE_PATH"])
+          token = os.environ["DOWNLOAD_TOKEN"]
+          region = os.environ["REGION"]
+          platform = os.environ["PLATFORM"]
+          filename = f"BlueArchive-{region}-{platform}.7z"
+          expected_path = f"/{token}/{filename}"
+
+          class Handler(BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
+
+              def get_file_info(self):
+                  stat = os.stat(archive_path)
+                  size = stat.st_size
+                  etag = f'"{size:x}-{stat.st_mtime_ns:x}"'
+                  last_modified = email.utils.formatdate(stat.st_mtime, usegmt=True)
+                  return size, etag, last_modified, stat.st_mtime
+
+              def get_requested_range(self, size, etag, last_modified, mtime):
+                  value = self.headers.get("Range")
+                  if not value:
+                      return None
+
+                  # If-Range mismatch means the client must receive the full file.
+                  if_range = self.headers.get("If-Range")
+                  if if_range:
+                      matches = if_range == etag
+                      if not matches:
+                          try:
+                              date = email.utils.parsedate_to_datetime(if_range)
+                              matches = date.timestamp() >= int(mtime)
+                          except (TypeError, ValueError, OverflowError):
+                              matches = False
+                      if not matches:
+                          return None
+
+                  # This endpoint intentionally supports one byte range per request.
+                  match = re.fullmatch(r"bytes=(\\d*)-(\\d*)", value.strip())
+                  if not match:
+                      return None
+
+                  first, last = match.groups()
+                  if not first and not last:
+                      return None
+
+                  try:
+                      if not first:
+                          suffix_length = int(last)
+                          if suffix_length <= 0 or size == 0:
+                              return "unsatisfiable"
+                          start = max(0, size - suffix_length)
+                          end = size - 1
+                      else:
+                          start = int(first)
+                          end = int(last) if last else size - 1
+                          if start >= size or end < start:
+                              return "unsatisfiable"
+                          end = min(end, size - 1)
+                  except (ValueError, OverflowError):
+                      return None
+
+                  return start, end
+
+              def send_archive_headers(
+                  self, status, size, etag, last_modified, start=0, end=None
+              ):
+                  if end is None:
+                      end = size - 1
+                  length = max(0, end - start + 1)
+
+                  self.send_response(status)
                   self.send_header("Content-Type", "application/x-7z-compressed")
-                  self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-                  self.send_header("Content-Length", str(os.path.getsize(archive_path)))
+                  self.send_header(
+                      "Content-Disposition",
+                      f'attachment; filename="{filename}"'
+                  )
+                  self.send_header("Content-Length", str(length))
+                  self.send_header("Accept-Ranges", "bytes")
+                  self.send_header("ETag", etag)
+                  self.send_header("Last-Modified", last_modified)
                   self.send_header("Cache-Control", "no-store")
-                  self.send_header("Accept-Ranges", "none")
+                  self.send_header("Connection", "close")
+
+                  if status == 206:
+                      self.send_header(
+                          "Content-Range", f"bytes {start}-{end}/{size}"
+                      )
+
                   self.end_headers()
+                  self.close_connection = True
+                  return start, length
 
               def do_HEAD(self):
                   if self.path != expected_path or not os.path.isfile(archive_path):
                       self.send_error(404)
                       return
-                  self.send_archive_headers()
+
+                  size, etag, last_modified, _ = self.get_file_info()
+                  self.send_archive_headers(200, size, etag, last_modified)
 
               def do_GET(self):
                   if self.path != expected_path:
                       self.send_error(404)
                       return
+
                   if not os.path.isfile(archive_path):
                       self.send_error(404, "Archive not found")
                       return
 
-                  self.send_archive_headers()
+                  size, etag, last_modified, mtime = self.get_file_info()
+                  requested_range = self.get_requested_range(
+                      size, etag, last_modified, mtime
+                  )
+
+                  if requested_range == "unsatisfiable":
+                      self.send_response(416)
+                      self.send_header("Content-Range", f"bytes */{size}")
+                      self.send_header("Content-Length", "0")
+                      self.send_header("Accept-Ranges", "bytes")
+                      self.send_header("Connection", "close")
+                      self.end_headers()
+                      self.close_connection = True
+                      return
+
+                  if requested_range is None:
+                      start, length = self.send_archive_headers(
+                          200, size, etag, last_modified
+                      )
+                  else:
+                      start, end = requested_range
+                      start, length = self.send_archive_headers(
+                          206, size, etag, last_modified, start, end
+                      )
+
                   try:
                       with open(archive_path, "rb") as archive:
-                          while True:
-                              chunk = archive.read(1024 * 1024)
+                          archive.seek(start)
+                          remaining = length
+
+                          while remaining > 0:
+                              chunk = archive.read(min(1024 * 1024, remaining))
                               if not chunk:
+                                  print("Archive ended before the advertised length", flush=True)
                                   break
                               self.wfile.write(chunk)
+                              remaining -= len(chunk)
+
                   except (BrokenPipeError, ConnectionResetError):
-                      print("Client disconnected before download completed", flush=True)
+                      print(
+                          "Client disconnected. The download can be resumed.",
+                          flush=True
+                      )
 
               def log_message(self, fmt, *args):
-                  print("%s - %s" % (self.client_address[0], fmt % args), flush=True)
+                  print(
+                      "%s - %s" % (self.client_address[0], fmt % args),
+                      flush=True
+                  )
 
-          ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
+                    ThreadingHTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
           PY
 
           nohup env DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" ARCHIVE_PATH="$ARCHIVE_PATH" REGION="$REGION" PLATFORM="$PLATFORM" \
@@ -223,11 +346,11 @@ jobs:
             echo
             echo "**Keep this Actions run active until the browser download finishes.** The link is public to anyone who obtains it while the tunnel is running."
             echo
-            echo "The server sends the exact Content-Length so Chrome can display the total size. Interrupted downloads cannot be resumed. Ensure the phone has enough free space for the archive and extraction."
+            echo "The server supports HTTP byte ranges (206 Partial Content), so compatible browsers and download managers can resume interrupted downloads while this workflow and tunnel remain active. Ensure the phone has enough free space for the archive and extraction."
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "Temporary download URL: $DOWNLOAD_URL"
-          echo "The tunnel is active. Keep this workflow running while downloading."
+          echo "The tunnel is active. Byte-range downloads are enabled; keep this workflow running while downloading or resuming."
           echo "The job will stop automatically at its 350-minute timeout."
           sleep 340m
 
