@@ -185,7 +185,7 @@ jobs:
                           return None
 
                   # This endpoint intentionally supports one byte range per request.
-                  match = re.fullmatch(r"bytes=(\\d*)-(\\d*)", value.strip())
+                  match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
                   if not match:
                       return None
 
